@@ -125,10 +125,6 @@ Then use the menu to install and manage the node.
 
 ## Run From GitHub
 
-Script URL:
-
-- https://github.com/VaniaHilkovets/QuipNetwork-node-autoinstall/blob/main/quip_manager.sh
-
 Download, make executable, and run:
 
 ```bash
