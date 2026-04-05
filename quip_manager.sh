@@ -1,5 +1,5 @@
 #!/bin/bash
-# Quip Network Node Manager v16
+# Quip Network Node Manager 
 
 INSTALL_DIR="$HOME/quip-node"
 REPO_URL="https://gitlab.com/quip.network/nodes.quip.network.git"
