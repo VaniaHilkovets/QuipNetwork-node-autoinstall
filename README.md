@@ -123,6 +123,24 @@ sudo bash quip.sh
 
 Then use the menu to install and manage the node.
 
+## Run From GitHub
+
+Script URL:
+
+- https://github.com/VaniaHilkovets/QuipNetwork-node-autoinstall/blob/main/quip_manager.sh
+
+Download, make executable, and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/VaniaHilkovets/QuipNetwork-node-autoinstall/main/quip_manager.sh -o quip_manager.sh && chmod +x quip_manager.sh && sudo bash quip_manager.sh
+```
+
+Or with `wget`:
+
+```bash
+wget -O quip_manager.sh https://raw.githubusercontent.com/VaniaHilkovets/QuipNetwork-node-autoinstall/main/quip_manager.sh && chmod +x quip_manager.sh && sudo bash quip_manager.sh
+```
+
 ## Notes
 
 - CPU mode uses configurable CPU worker count
