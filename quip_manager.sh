@@ -1,5 +1,5 @@
 #!/bin/bash
-# Quip Network Node Manager v16
+# Quip Network Node Manager 
 
 INSTALL_DIR="$HOME/quip-node"
 REPO_URL="https://gitlab.com/quip.network/nodes.quip.network.git"
@@ -22,37 +22,6 @@ save_gpu_util() { echo "$1" > "$GPU_UTIL_FILE"; }
 load_saved_gpu_yield() { tr -d '[:space:]' < "$GPU_YIELD_FILE" 2>/dev/null; }
 save_gpu_yield() { echo "$1" > "$GPU_YIELD_FILE"; }
 load_profile
-
-is_wsl() {
-    [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qi microsoft /proc/version 2>/dev/null
-}
-
-prepare_docker_config() {
-    local docker_home docker_cfg docker_tmp context
-    docker_home="$HOME/.docker"
-    docker_cfg="$docker_home/config.json"
-
-    if ! is_wsl || [ ! -f "$docker_cfg" ] || ! grep -q '"credsStore"[[:space:]]*:[[:space:]]*"desktop"' "$docker_cfg"; then
-        return 0
-    fi
-
-    docker_tmp="$HOME/.docker-quip"
-    rm -rf "$docker_tmp"
-    mkdir -p "$docker_tmp"
-    cp -a "$docker_home/." "$docker_tmp/" 2>/dev/null || true
-
-    context=$(sed -n 's/.*"currentContext"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$docker_cfg" | head -n1)
-    if [ -n "$context" ]; then
-        printf '{\n  "auths": {},\n  "currentContext": "%s"\n}\n' "$context" > "$docker_tmp/config.json"
-    else
-        printf '{\n  "auths": {}\n}\n' > "$docker_tmp/config.json"
-    fi
-
-    export DOCKER_CONFIG="$docker_tmp"
-    echo -e "  ${DIM}using docker config without desktop credential helper in wsl${N}"
-}
-
-prepare_docker_config
 
 dc() { docker compose --profile "$NODE_PROFILE" "$@"; }
 
@@ -501,24 +470,8 @@ install_nvidia_toolkit() {
     systemctl restart docker; sleep 3
 }
 
-resolve_nvidia_smi() {
-    if command -v nvidia-smi &>/dev/null; then
-        command -v nvidia-smi
-        return 0
-    fi
-    if [ -x /usr/lib/wsl/lib/nvidia-smi ]; then
-        echo /usr/lib/wsl/lib/nvidia-smi
-        return 0
-    fi
-    return 1
-}
-
 check_gpu() {
-    local nvidia_smi
-    if ! nvidia_smi="$(resolve_nvidia_smi)"; then
-        echo -e "  ${R}nvidia driver not found${N}"; return 1
-    fi
-    if ! "$nvidia_smi" &>/dev/null; then
+    if ! command -v nvidia-smi &>/dev/null; then
         echo -e "  ${R}nvidia driver not found${N}"; return 1
     fi
     if ! docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu22.04 nvidia-smi &>/dev/null 2>&1; then
