@@ -88,6 +88,7 @@ get_effective_gpu_yielding() {
 }
 
 REST_PORT=20050
+REST_INTERNAL_PORT=80
 REST_HOST="127.0.0.1"
 REST_BIND_HOST="0.0.0.0"
 
@@ -108,20 +109,79 @@ enable_rest_api() {
         sed -i "/^\[global\]/a rest_port = -1" "$cfg"
     fi
     if grep -q "^rest_insecure_port" "$cfg"; then
-        sed -i "s|^rest_insecure_port = .*|rest_insecure_port = ${REST_PORT}|" "$cfg"
+        sed -i "s|^rest_insecure_port = .*|rest_insecure_port = ${REST_INTERNAL_PORT}|" "$cfg"
     elif grep -q "^# rest_insecure_port" "$cfg"; then
-        sed -i "s|^# rest_insecure_port = .*|rest_insecure_port = ${REST_PORT}|" "$cfg"
+        sed -i "s|^# rest_insecure_port = .*|rest_insecure_port = ${REST_INTERNAL_PORT}|" "$cfg"
     else
-        sed -i "/^\[global\]/a rest_insecure_port = ${REST_PORT}" "$cfg"
+        sed -i "/^\[global\]/a rest_insecure_port = ${REST_INTERNAL_PORT}" "$cfg"
     fi
 }
 
 enable_rest_in_compose() {
     local compose="$INSTALL_DIR/docker-compose.yml"
     [ ! -f "$compose" ] && return
-    sed -i '/127\.0\.0\.1:20050:20050/d' "$compose"
-    sed -i '/20049:20049/a\      - "127.0.0.1:20050:20050"' "$compose"
-    echo -e "  ${DIM}rest api port synced in docker-compose${N}"
+    local tmp
+    tmp=$(mktemp) || return
+    awk -v host_port="$REST_PORT" -v internal_port="$REST_INTERNAL_PORT" '
+        BEGIN {
+            in_node=0
+            in_ports=0
+            added=0
+        }
+        /^  (cpu|cuda|qpu):$/ {
+            if (in_node && in_ports && !added) {
+                print "      - \"127.0.0.1:" host_port ":" internal_port "\""
+            }
+            in_node=1
+            in_ports=0
+            added=0
+            print
+            next
+        }
+        /^  [A-Za-z0-9_-]+:$/ {
+            if (in_node && in_ports && !added) {
+                print "      - \"127.0.0.1:" host_port ":" internal_port "\""
+            }
+            in_node=0
+            in_ports=0
+            added=0
+            print
+            next
+        }
+        in_node && /^    ports:$/ {
+            in_ports=1
+            print
+            next
+        }
+        in_node && in_ports && /^    [A-Za-z0-9_-]+:/ {
+            if (!added) {
+                print "      - \"127.0.0.1:" host_port ":" internal_port "\""
+            }
+            in_ports=0
+            added=0
+            print
+            next
+        }
+        in_node && in_ports && $0 ~ "127\\.0\\.0\\.1:" host_port ":" {
+            next
+        }
+        in_node && in_ports && $0 ~ "\"" host_port ":" {
+            next
+        }
+        {
+            print
+            if (in_node && in_ports && $0 ~ /"20049:20049\/tcp"/ && !added) {
+                print "      - \"127.0.0.1:" host_port ":" internal_port "\""
+                added=1
+            }
+        }
+        END {
+            if (in_node && in_ports && !added) {
+                print "      - \"127.0.0.1:" host_port ":" internal_port "\""
+            }
+        }
+    ' "$compose" > "$tmp" && mv "$tmp" "$compose"
+    echo -e "  ${DIM}rest api synced: compose quip-node:${REST_INTERNAL_PORT}, local ${REST_HOST}:${REST_PORT}${N}"
 }
 
 enable_cuda_in_compose() {
@@ -132,6 +192,38 @@ enable_cuda_in_compose() {
     sed -i '/^    gpus: all$/d' "$compose"
     sed -i '/^    container_name: quip-cuda$/a\    gpus: all' "$compose"
     echo -e "  ${DIM}cuda service synced with gpus: all${N}"
+}
+
+set_env_value() {
+    local file="$1" key="$2" value="$3"
+    if grep -qE "^#?[[:space:]]*${key}=" "$file"; then
+        sed -i "s|^#*[[:space:]]*${key}=.*|${key}=${value}|" "$file"
+    else
+        printf '\n%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+sync_env_defaults() {
+    local env_file="$INSTALL_DIR/.env"
+    [ ! -f "$env_file" ] && return
+
+    local puid pgid
+    puid="${SUDO_UID:-$(id -u 2>/dev/null || echo 1000)}"
+    pgid="${SUDO_GID:-$(id -g 2>/dev/null || echo 1000)}"
+
+    set_env_value "$env_file" "PUID" "$puid"
+    set_env_value "$env_file" "PGID" "$pgid"
+}
+
+set_global_string() {
+    local cfg="$1" key="$2" value="$3"
+    if grep -q "^${key}" "$cfg"; then
+        sed -i "s|^${key} = .*|${key} = \"${value}\"|" "$cfg"
+    elif grep -q "^# ${key}" "$cfg"; then
+        sed -i "s|^# ${key} = .*|${key} = \"${value}\"|" "$cfg"
+    else
+        sed -i "/^\[global\]/a ${key} = \"${value}\"" "$cfg"
+    fi
 }
 
 set_num_cpus() {
@@ -356,7 +448,7 @@ get_rest_stats_json() {
     docker exec "$c" python3 -c "
 import json, sys, urllib.request
 try:
-    with urllib.request.urlopen('http://127.0.0.1:${REST_PORT}/api/v1/stats', timeout=2) as r:
+    with urllib.request.urlopen('http://127.0.0.1:${REST_INTERNAL_PORT}/api/v1/stats', timeout=2) as r:
         data = r.read().decode('utf-8', 'replace')
     json.loads(data)
     print(data)
@@ -573,11 +665,7 @@ do_install() {
     cp "data/config.${NODE_PROFILE}.toml" "$CONFIG_FILE"
     sed -i "s|node_name = .*|node_name = \"${NODE_NAME}\"|" "$CONFIG_FILE"
     sed -i "s|secret = .*|secret = \"${NODE_SECRET}\"|" "$CONFIG_FILE"
-    grep -q "^# public_host" "$CONFIG_FILE" && \
-        sed -i "s|# public_host = .*|public_host = \"${PUBLIC_HOST}\"|" "$CONFIG_FILE" || \
-    grep -q "^public_host" "$CONFIG_FILE" && \
-        sed -i "s|public_host = .*|public_host = \"${PUBLIC_HOST}\"|" "$CONFIG_FILE" || \
-        sed -i "/^\[global\]/a public_host = \"${PUBLIC_HOST}\"" "$CONFIG_FILE"
+    set_global_string "$CONFIG_FILE" "public_host" "$PUBLIC_HOST"
 
     if [ "$NODE_PROFILE" = "cpu" ] && [ -n "$NUM_CPUS" ]; then
         set_num_cpus "$CONFIG_FILE" "$NUM_CPUS"
@@ -594,6 +682,7 @@ do_install() {
     enable_rest_api "$CONFIG_FILE"
 
     [ ! -f "$INSTALL_DIR/.env" ] && (cp env.example "$INSTALL_DIR/.env" 2>/dev/null || touch "$INSTALL_DIR/.env")
+    sync_env_defaults
 
     echo -e "  ${DIM}updating docker-compose...${N}"
     enable_rest_in_compose
@@ -763,6 +852,10 @@ do_update() {
     cd "$INSTALL_DIR"
     git pull --ff-only 2>/dev/null || true
     sync_cpu_config
+    [ -f "$CONFIG_FILE" ] && enable_rest_api "$CONFIG_FILE"
+    sync_env_defaults
+    enable_rest_in_compose
+    enable_cuda_in_compose
     dc pull && dc up -d --force-recreate
     read -p "  enter..."
 }
@@ -816,7 +909,7 @@ do_switch() {
     cp "data/config.${NODE_PROFILE}.toml" "$CONFIG_FILE"
     [ -n "$name"   ] && sed -i "s|node_name = .*|node_name = \"${name}\"|" "$CONFIG_FILE"
     [ -n "$secret" ] && sed -i "s|secret = .*|secret = \"${secret}\"|" "$CONFIG_FILE"
-    [ -n "$host"   ] && sed -i "s|public_host = .*|public_host = \"${host}\"|" "$CONFIG_FILE"
+    [ -n "$host"   ] && set_global_string "$CONFIG_FILE" "public_host" "$host"
 
     if [ "$NODE_PROFILE" = "cpu" ]; then
         total_cpus=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
