@@ -170,9 +170,14 @@ do_install() {
     case "$m" in 2) save_mode miner;; *) save_mode node;; esac
     echo ""
 
+    local def=1 hint=""
+    if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null; then
+        def=2; hint="  ${DIM}(gpu detected → default)${N}"
+    fi
     echo -e "  ${C}1${N}  cpu"
-    echo -e "  ${C}2${N}  cuda (gpu)"
-    read -p "  backend [1]: " p
+    echo -e "  ${C}2${N}  cuda (gpu)${hint}"
+    read -p "  backend [${def}]: " p
+    [ -z "$p" ] && p="$def"
     case "$p" in 2) save_profile cuda;; *) save_profile cpu;; esac
     echo ""
     [ "$NODE_PROFILE" = "cuda" ] && { check_gpu || { read -p "  "; return; }; }
