@@ -289,6 +289,18 @@ do_install() {
     if [ "$NODE_PROFILE" = "cuda" ]; then
         grep -q '^\[cuda\.0\]' "$CONFIG_FILE" || printf '\n[cuda.0]\nutilization = %s\n' "$GPU_UTIL" >> "$CONFIG_FILE"
     fi
+    # IMPORTANT (v0.2): the miner reports node_name = the CONTAINER HOSTNAME;
+    # config.toml's node_name is IGNORED. So set the hostname (sanitised to a
+    # valid DNS name, <=63 chars) via a compose override — this is what carries
+    # your EVM address on-chain for the airdrop linkage.
+    local HN
+    HN=$(printf '%s' "$NODE_NAME" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-63)
+    {
+        echo "services:"
+        echo "  ${NODE_PROFILE}:"
+        echo "    hostname: \"${HN}\""
+    } > "$INSTALL_DIR/docker-compose.override.yml"
+    echo -e "  ${DIM}node_name (on-chain) = ${HN}${N}"
 
     echo -e "  ${DIM}env...${N}"
     [ -f "$ENV_FILE" ] || cp env.example "$ENV_FILE"
