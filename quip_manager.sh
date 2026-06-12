@@ -151,10 +151,16 @@ check_gpu() {
     return 0
 }
 
-start_mps() {
-    command -v nvidia-cuda-mps-control &>/dev/null || { echo -e "  ${DIM}MPS utils absent — software fallback${N}"; return; }
-    grep -qi microsoft /proc/version 2>/dev/null && { echo -e "  ${DIM}WSL2 — MPS unsupported, software fallback${N}"; return; }
-    nvidia-cuda-mps-control -d 2>/dev/null && echo -e "  ${DIM}NVIDIA MPS daemon started${N}"
+# Single-GPU mining does NOT need NVIDIA MPS (it's only for sharing one GPU across
+# several miner processes). A flaky MPS daemon crash-loops the CUDA miner
+# (cudaErrorMpsServerNotReady / MpsConnectionFailed), so we ensure MPS is OFF and
+# the miner talks to the GPU directly — stable. Set CSD_QUIP_MPS=1 to keep MPS.
+ensure_no_mps() {
+    [ "${CSD_QUIP_MPS:-0}" = "1" ] && { nvidia-cuda-mps-control -d 2>/dev/null; echo -e "  ${DIM}MPS enabled (multi-miner)${N}"; return; }
+    echo quit | nvidia-cuda-mps-control 2>/dev/null
+    pkill -9 -f nvidia-cuda-mps 2>/dev/null
+    rm -rf /tmp/nvidia-mps/* 2>/dev/null
+    echo -e "  ${DIM}MPS off — direct GPU (stable for single-GPU)${N}"
 }
 
 # ---------- install ----------------------------------------------------------
@@ -184,6 +190,18 @@ do_install() {
 
     read -p "  node name (display) [quip-$(hostname -s 2>/dev/null || echo node)]: " NODE_NAME
     NODE_NAME="${NODE_NAME:-quip-$(hostname -s 2>/dev/null || echo node)}"
+
+    # EVM address for the airdrop/quest. It is embedded into node_name (which the
+    # miner publishes on-chain via the auto-identify remark), so the quest portal
+    # can attribute this node's participation to your EVM wallet.
+    local EVM=""
+    while true; do
+        read -p "  EVM address for airdrop (0x...40hex, Enter to skip): " EVM
+        [ -z "$EVM" ] && break
+        echo "$EVM" | grep -qiE '^0x[0-9a-fA-F]{40}$' && break
+        echo -e "  ${Y}invalid — need 0x + 40 hex${N}"
+    done
+    [ -n "$EVM" ] && NODE_NAME="${NODE_NAME}-${EVM}" && echo -e "  ${DIM}node_name = ${NODE_NAME}${N}"
 
     # --- miner mode: where is the node? -------------------------------------
     local VALIDATORS=""
@@ -303,7 +321,7 @@ PY
 
     echo -e "  ${DIM}pulling images...${N}"
     c_pull
-    [ "$NODE_PROFILE" = "cuda" ] && start_mps
+    [ "$NODE_PROFILE" = "cuda" ] && ensure_no_mps
     echo -e "  ${DIM}starting ($([ "$NODE_MODE" = miner ] && echo 'miner only' || echo 'full node'))...${N}"
     c_up --force-recreate 2>/dev/null || c_up
 
@@ -385,7 +403,7 @@ do_update() {
     [ -d "$INSTALL_DIR" ] || { echo -e "  ${R}not installed${N}"; read -p "  "; return; }
     cd "$INSTALL_DIR" || return
     git pull --ff-only 2>/dev/null || true
-    [ "$NODE_PROFILE" = "cuda" ] && start_mps
+    [ "$NODE_PROFILE" = "cuda" ] && ensure_no_mps
     c_pull && c_up
     read -p "  enter..."
 }
@@ -404,7 +422,7 @@ do_switch() {
     if [ "$NODE_MODE" = miner ]; then docker compose rm -sf "$old" 2>/dev/null || true
     else docker compose --profile "$old" down 2>/dev/null || true; fi
     save_profile "$NODE_PROFILE"
-    [ "$NODE_PROFILE" = "cuda" ] && start_mps
+    [ "$NODE_PROFILE" = "cuda" ] && ensure_no_mps
     c_pull && c_up
     read -p "  enter..."
 }
