@@ -394,6 +394,38 @@ do_info() {
         [ -n "$s" ] && { echo -e "  ${BOLD}/api/v1/${ep}${N}"; echo "$s" | jq -C '.' 2>/dev/null | sed 's/^/    /' | head -40 || echo "$s" | head -c 800; break; }
     done
     [ -z "$s" ] && echo -e "  ${DIM}api not reachable here — see node dashboard / miner logs${N}"
+
+    # --- ALL tracked miners, on-chain (this box + ~/.quip_miners list) ---------
+    local mc; mc=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -m1 -E '^quip-(cpu|cuda)$')
+    if [ -n "$mc" ]; then
+        echo ""
+        echo -e "  ${BOLD}all miners (on-chain)${N}  ${DIM}add more:  echo <ss58> >> ~/.quip_miners${N}"
+        local url; url=$(grep -E '^QUIP_VALIDATORS=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
+        [ -z "$url" ] && url="ws://quip-validator:9944"
+        { get_wallet; cat "$HOME/.quip_miners" 2>/dev/null; } | awk 'NF&&!seen[$0]++' > /tmp/.qm_$$
+        # shellcheck disable=SC2046
+        docker exec -i "$mc" python3 - "$url" $(cat /tmp/.qm_$$) <<'PY' 2>/dev/null
+import sys
+try:
+    from substrateinterface import SubstrateInterface
+except Exception:
+    print("    (substrate-interface not in image)"); sys.exit()
+url=sys.argv[1]; addrs=sys.argv[2:]
+try: s=SubstrateInterface(url=url)
+except Exception as e: print("    rpc unreachable:",str(e)[:50]); sys.exit()
+print("    %-13s %4s %4s %10s %11s"%("address","sub","won","rewards","balance"))
+for a in addrs:
+    try:
+        m=s.query('QuantumPow','Miners',[a]).value or {}
+        ac=s.query('System','Account',[a]).value
+        bal=(ac['data']['free'] if ac else 0)/1e12
+        print("    %-13s %4s %4s %9.3f %10.3f"%(a[:11]+'…',m.get('proofs_submitted','-'),m.get('proofs_won','-'),m.get('rewards_earned',0)/1e12,bal))
+    except Exception as e:
+        print("    %-13s  err %s"%(a[:11]+'…',str(e)[:28]))
+print("    (rewards/balance in tQUIP)")
+PY
+        rm -f /tmp/.qm_$$
+    fi
     echo ""
     read -p "  enter..."
 }
