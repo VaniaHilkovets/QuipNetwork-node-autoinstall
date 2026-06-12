@@ -169,11 +169,8 @@ do_install() {
     header
     [ "$EUID" -ne 0 ] && { echo -e "  ${R}run as root: sudo bash $0${N}"; read -p "  "; return; }
 
-    echo -e "  ${BOLD}what to install?${N}"
-    echo -e "  ${C}1${N}  node   ${DIM}(full: validator + miner + dashboard)${N}"
-    echo -e "  ${C}2${N}  miner  ${DIM}(miner only — connects to a node)${N}"
-    read -p "  [1]: " m
-    case "$m" in 2) save_mode miner;; *) save_mode node;; esac
+    save_mode node   # always install a full node (validator + miner + dashboard) — self-contained
+    echo -e "  ${DIM}installing a full node: validator + miner + dashboard${N}"
     echo ""
 
     local def=1 hint=""
@@ -203,30 +200,7 @@ do_install() {
     done
     [ -n "$EVM" ] && NODE_NAME="${NODE_NAME}-${EVM}" && echo -e "  ${DIM}node_name = ${NODE_NAME}${N}"
 
-    # --- miner mode: where is the node? -------------------------------------
-    local VALIDATORS=""
-    if [ "$NODE_MODE" = "miner" ]; then
-        echo ""
-        echo -e "  ${DIM}node RPC: enter your node's IP (or full ws:// URL).${N}"
-        echo -e "  ${DIM}Enter = use a LOCAL node on this box (if one is running).${N}"
-        read -p "  node ip [local]: " nip
-        if [ -z "$nip" ]; then
-            if local_node_running; then
-                VALIDATORS="ws://quip-validator:9944"
-                echo -e "  ${G}using local node${N} ${DIM}(ws://quip-validator:9944)${N}"
-            else
-                echo -e "  ${R}⚠ no local node found on this box.${N}"
-                echo -e "  ${Y}install a node first (option 1) or re-run and enter your node's IP.${N}"
-                read -p "  "; return
-            fi
-        else
-            case "$nip" in
-                ws://*|wss://*) VALIDATORS="$nip" ;;
-                *)              VALIDATORS="ws://${nip}:20049/rpc" ;;
-            esac
-            echo -e "  ${DIM}node rpc = ${VALIDATORS}${N}"
-        fi
-    fi
+    local VALIDATORS=""   # full node uses its own bundled local validator (ws://quip-validator:9944)
 
     local TOTAL_CPUS CPUSET="" GPU_UTIL="100"
     TOTAL_CPUS=$(nproc 2>/dev/null || echo 1)
@@ -530,7 +504,7 @@ do_backup() {
 
 while true; do
     header
-    echo -e "  ${C}1${N}  install   ${DIM}(node or miner)${N}"
+    echo -e "  ${C}1${N}  install   ${DIM}(full node: validator + miner)${N}"
     echo -e "  ${C}2${N}  start"
     echo -e "  ${C}3${N}  stop"
     echo -e "  ${C}4${N}  logs"
