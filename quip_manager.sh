@@ -38,7 +38,7 @@ save_mode()    { echo "$1" > "$MODE_FILE";    NODE_MODE="$1"; }
 # node  : `docker compose --profile <p> ...`  (validator + dashboard + caddy + miner)
 # miner : `docker compose <verb> <p>`         (only the cpu|cuda miner service)
 c_up()   { cd "$INSTALL_DIR" || return 1
-    if [ "$NODE_MODE" = miner ]; then docker compose up -d "$NODE_PROFILE"
+    if [ "$NODE_MODE" = miner ]; then docker compose up -d --no-deps "$NODE_PROFILE"
     else docker compose --profile "$NODE_PROFILE" up -d "$@"; fi; }
 c_down() { cd "$INSTALL_DIR" || return 1
     if [ "$NODE_MODE" = miner ]; then docker compose rm -sf "$NODE_PROFILE"
@@ -265,6 +265,12 @@ do_install() {
     echo -e "  ${DIM}config...${N}"
     [ -f "$CONFIG_FILE" ] || cp "data/config.${NODE_PROFILE}.toml" "$CONFIG_FILE"
     sed -i "s|^\([[:space:]]*node_name[[:space:]]*=\).*|\1 \"${NODE_NAME}\"|" "$CONFIG_FILE"
+    # CUDA: the entrypoint only auto-generates [cuda.N] for a FRESH config, not an
+    # existing one. Without a real [cuda.0] the miner builds 0 GPU handles and
+    # crash-loops ("no miner handles built for kind=gpu"). Ensure it exists.
+    if [ "$NODE_PROFILE" = "cuda" ]; then
+        grep -q '^\[cuda\.0\]' "$CONFIG_FILE" || printf '\n[cuda.0]\nutilization = %s\n' "$GPU_UTIL" >> "$CONFIG_FILE"
+    fi
 
     echo -e "  ${DIM}env...${N}"
     [ -f "$ENV_FILE" ] || cp env.example "$ENV_FILE"
@@ -277,7 +283,20 @@ do_install() {
     [ "$NODE_MODE" = "node" ] && set_env_value "$ENV_FILE" "QUIP_HOSTNAME" ":20049"
     if [ -n "$VALIDATORS" ]; then
         set_env_value "$ENV_FILE" "QUIP_VALIDATORS" "$VALIDATORS"
-        sed -i "s|^\([[:space:]]*validators[[:space:]]*=\).*|\1 [\"${VALIDATORS}\"]|" "$CONFIG_FILE" 2>/dev/null || true
+        # Rewrite the validators array properly. The naive sed broke the multi-line
+        # TOML array (left dangling lines -> parse error -> crash loop), so do it in
+        # Python: collapse any multi-line OR single-line array to one clean line.
+        python3 - "$CONFIG_FILE" "$VALIDATORS" <<'PY' 2>/dev/null || true
+import re, sys
+f, url = sys.argv[1], sys.argv[2]
+s = open(f).read()
+new = 'validators = ["%s"]' % url
+s = re.sub(r'validators\s*=\s*\[[\s\S]*?\n\]', new, s, count=1)   # multi-line array
+s = re.sub(r'validators\s*=\s*\[[^\n]*\]', new, s, count=1)        # single-line array
+if 'validators' not in s:
+    s += '\n' + new + '\n'
+open(f, 'w').write(s)
+PY
     fi
     if [ "$NODE_PROFILE" = "cpu" ]; then set_env_value "$ENV_FILE" "QUIP_MINER_CPUSET" "$CPUSET"
     else set_env_value "$ENV_FILE" "QUIP_GPU_UTILIZATION" "$GPU_UTIL"; fi
@@ -404,6 +423,47 @@ do_remove() {
     read -p "  enter..."
 }
 
+do_backup() {
+    header
+    local kf="$KEYSTORE"
+    if [ ! -f "$kf" ]; then
+        echo -e "  ${Y}keystore not generated yet (node still bootstrapping) — try again in a minute${N}"
+        read -p "  "; return
+    fi
+    echo -e "  ${BOLD}WALLET BACKUP${N}  ${DIM}(miner = node wallet; same keystore)${N}"
+    echo ""
+    echo -e "  ${DIM}files to save — keep PRIVATE, chmod 600:${N}"
+    echo -e "    ${C}$kf${N}"
+    echo -e "       ${DIM}↑ your wallet — contains the seed + ML-DSA key (THE important file)${N}"
+    echo -e "    ${C}$INSTALL_DIR/data/config.toml${N}   ${DIM}node_name + secret${N}"
+    [ -d "$INSTALL_DIR/data/validator-data" ] && \
+        echo -e "    ${C}$INSTALL_DIR/data/validator-data/${N}   ${DIM}validator (node) keys${N}"
+    echo ""
+    local ss58 seed
+    ss58=$(jq -r '.ss58 // empty' "$kf" 2>/dev/null)
+    seed=$(jq -r '.master_seed_hex // .seed // .master_seed // empty' "$kf" 2>/dev/null)
+    echo -e "  ${DIM}address (ss58)${N}   ${C}${ss58}${N}"
+    echo -e "  ${DIM}SEED (master_seed_hex) — this recovers your wallet, NEVER share:${N}"
+    echo -e "  ${Y}${seed}${N}"
+    echo -e "  ${DIM}Quip has no 12/24-word phrase — this hex IS your seed.${N}"
+    echo ""
+    read -p "  copy keystore + config to a backup folder now? [y/N]: " a
+    if [ "$a" = "y" ] || [ "$a" = "Y" ]; then
+        local dst; dst="$HOME/quip-backup-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p "$dst"
+        cp "$kf" "$dst/" 2>/dev/null
+        cp "$INSTALL_DIR/data/config.toml" "$dst/" 2>/dev/null
+        [ -d "$INSTALL_DIR/data/validator-data" ] && cp -r "$INSTALL_DIR/data/validator-data" "$dst/" 2>/dev/null
+        chmod -R go-rwx "$dst" 2>/dev/null
+        tar czf "${dst}.tar.gz" -C "$HOME" "$(basename "$dst")" 2>/dev/null
+        echo -e "  ${G}saved:${N} ${dst}"
+        echo -e "  ${G}archive:${N} ${dst}.tar.gz"
+        echo -e "  ${Y}download the .tar.gz off this server (scp) and keep it OFFLINE.${N}"
+    fi
+    echo ""
+    read -p "  enter..."
+}
+
 # ---------- menu -------------------------------------------------------------
 
 while true; do
@@ -416,6 +476,7 @@ while true; do
     echo -e "  ${C}6${N}  update"
     echo -e "  ${C}7${N}  switch backend  ${DIM}(${NODE_PROFILE^^})${N}"
     echo -e "  ${C}8${N}  remove"
+    echo -e "  ${C}9${N}  backup wallet  ${DIM}(seed + key files)${N}"
     echo -e "  ${DIM}0  exit${N}"
     echo ""
     printf "  ${DIM}+--------------- ${BOLD}${C}TELEGRAM${N}${DIM} ----------------+${N}\n"
@@ -433,6 +494,7 @@ while true; do
         6) do_update ;;
         7) do_switch ;;
         8) do_remove ;;
+        9) do_backup ;;
         0) exit 0 ;;
         *) sleep 0.3 ;;
     esac

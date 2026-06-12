@@ -26,6 +26,10 @@ airdrop/reward address.** If you lose it, it's gone — there is no recovery.
 | `~/quip-node/data/config.toml` | Node config incl. the `secret` used for deterministic key generation | harder to reproduce the same identity |
 | `~/quip-node/data/validator-data/` | Validator libp2p + session keys (only matters for named/bootnode validators) | new peer id (regenerable for normal miners) |
 
+> The seed lives in the **`master_seed_hex`** field of `keystore.json` — a hex
+> string. **Quip has no 12/24-word mnemonic**; this hex *is* your seed. The
+> manager's **`9) backup wallet`** menu prints it and copies the key files for you.
+
 **Simplest safe backup — copy the whole `data/` dir somewhere private:**
 
 ```bash
