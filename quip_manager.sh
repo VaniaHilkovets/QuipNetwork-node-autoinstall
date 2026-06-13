@@ -87,6 +87,39 @@ open(path, 'w').write(text)
 PY
 }
 
+set_cuda_devices() {
+    local file="$1" count="$2" utilization="$3"
+    [ -f "$file" ] || return
+    python3 - "$file" "$count" "$utilization" <<'PY' 2>/dev/null || true
+import re, sys
+
+path, count, utilization = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+try:
+    text = open(path).read()
+except OSError:
+    sys.exit(0)
+
+def upsert_section_value(source, section_name, key, value):
+    section_re = re.compile(rf'(?ms)^\[{re.escape(section_name)}\]\s*$.*?(?=^\[|\Z)')
+    match = section_re.search(source)
+    if match:
+        section = match.group(0)
+        if re.search(rf'(?m)^\s*#?\s*{re.escape(key)}\s*=', section):
+            section = re.sub(rf'(?m)^\s*#?\s*{re.escape(key)}\s*=.*$', f'{key} = {value}', section, count=1)
+        else:
+            section = section.rstrip() + f'\n{key} = {value}\n'
+        return source[:match.start()] + section + source[match.end():]
+    return source.rstrip() + f'\n\n[{section_name}]\n{key} = {value}\n'
+
+text = upsert_section_value(text, 'gpu', 'utilization', utilization)
+text = re.sub(r'(?ms)^\[cuda\.\d+\]\s*$.*?(?=^\[|\Z)', '', text).rstrip()
+for idx in range(count):
+    text += f'\n\n[cuda.{idx}]\nutilization = {utilization}\n'
+
+open(path, 'w').write(text + '\n')
+PY
+}
+
 choose_cpu_cores() {
     local total nc
     total=$(nproc 2>/dev/null || echo 1)
@@ -99,6 +132,20 @@ choose_cpu_cores() {
         CPUSET="0-$((total-1))"
     fi
     echo -e "  ${DIM}cpuset = ${CPUSET}${N}"
+}
+
+detect_gpu_count() {
+    nvidia-smi -L 2>/dev/null | awk '/^GPU [0-9]+:/{c++} END{print c+0}'
+}
+
+choose_gpu_utilization() {
+    local gu
+    GPU_COUNT=$(detect_gpu_count)
+    [ "$GPU_COUNT" -ge 1 ] || GPU_COUNT=1
+    echo -e "  ${DIM}gpu devices = ${GPU_COUNT}${N}"
+    read -p "  gpu SM utilization per GPU 1-100 [100]: " gu
+    echo "$gu" | grep -qE '^[0-9]+$' && [ "$gu" -ge 1 ] && [ "$gu" -le 100 ] && GPU_UTIL="$gu"
+    echo -e "  ${DIM}gpu utilization = ${GPU_UTIL}% on each GPU${N}"
 }
 
 get_node_name() { grep -E '^[[:space:]]*node_name' "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d'"' -f2; }
@@ -244,13 +291,11 @@ do_install() {
 
     local VALIDATORS=""   # full node uses its own bundled local validator (ws://quip-validator:9944)
 
-    local CPUSET="" CPU_COUNT="" GPU_UTIL="100"
+    local CPUSET="" CPU_COUNT="" GPU_COUNT="" GPU_UTIL="100"
     if [ "$NODE_PROFILE" = "cpu" ]; then
         choose_cpu_cores
     else
-        read -p "  gpu SM utilization 1-100 [100]: " gu
-        echo "$gu" | grep -qE '^[0-9]+$' && [ "$gu" -ge 1 ] && [ "$gu" -le 100 ] && GPU_UTIL="$gu"
-        echo -e "  ${DIM}gpu utilization = ${GPU_UTIL}%${N}"
+        choose_gpu_utilization
     fi
     echo ""
 
@@ -297,11 +342,8 @@ do_install() {
     if [ "$NODE_PROFILE" = "cpu" ]; then
         set_cpu_num_cpus "$CONFIG_FILE" "$CPU_COUNT"
     fi
-    # CUDA: the entrypoint only auto-generates [cuda.N] for a FRESH config, not an
-    # existing one. Without a real [cuda.0] the miner builds 0 GPU handles and
-    # crash-loops ("no miner handles built for kind=gpu"). Ensure it exists.
     if [ "$NODE_PROFILE" = "cuda" ]; then
-        grep -q '^\[cuda\.0\]' "$CONFIG_FILE" || printf '\n[cuda.0]\nutilization = %s\n' "$GPU_UTIL" >> "$CONFIG_FILE"
+        set_cuda_devices "$CONFIG_FILE" "$GPU_COUNT" "$GPU_UTIL"
     fi
     # IMPORTANT (v0.2): the miner reports node_name = the CONTAINER HOSTNAME;
     # config.toml's node_name is IGNORED. So set the hostname (sanitised to a
@@ -370,7 +412,7 @@ PY
 do_start() {
     header
     [ -d "$INSTALL_DIR" ] || { echo -e "  ${R}not installed${N}"; read -p "  "; return; }
-    [ "$NODE_PROFILE" = "cuda" ] && { check_gpu || { read -p "  "; return; }; start_mps; }
+    [ "$NODE_PROFILE" = "cuda" ] && { check_gpu || { read -p "  "; return; }; ensure_no_mps; }
     c_up
     read -p "  enter..."
 }
@@ -469,7 +511,7 @@ do_update() {
 do_switch() {
     header
     [ -d "$INSTALL_DIR" ] || { echo -e "  ${R}not installed${N}"; read -p "  "; return; }
-    local old="$NODE_PROFILE" CPUSET="" CPU_COUNT=""
+    local old="$NODE_PROFILE" CPUSET="" CPU_COUNT="" GPU_COUNT="" GPU_UTIL="100"
     echo -e "  ${DIM}switch backend (keeps mode + wallet)${N}"
     echo -e "  ${C}1${N}  cpu"
     echo -e "  ${C}2${N}  cuda"
@@ -478,6 +520,8 @@ do_switch() {
     [ "$NODE_PROFILE" = "cuda" ] && { check_gpu || { NODE_PROFILE="$old"; read -p "  "; return; }; }
     if [ "$NODE_PROFILE" = "cpu" ]; then
         choose_cpu_cores
+    else
+        choose_gpu_utilization
     fi
     cd "$INSTALL_DIR" || return
     if [ "$NODE_PROFILE" = "cpu" ]; then
@@ -485,6 +529,11 @@ do_switch() {
         [ -f "$CONFIG_FILE" ] || cp "data/config.cpu.toml" "$CONFIG_FILE"
         set_env_value "$ENV_FILE" "QUIP_MINER_CPUSET" "$CPUSET"
         set_cpu_num_cpus "$CONFIG_FILE" "$CPU_COUNT"
+    else
+        [ -f "$ENV_FILE" ] || cp env.example "$ENV_FILE"
+        [ -f "$CONFIG_FILE" ] || cp "data/config.cuda.toml" "$CONFIG_FILE"
+        set_env_value "$ENV_FILE" "QUIP_GPU_UTILIZATION" "$GPU_UTIL"
+        set_cuda_devices "$CONFIG_FILE" "$GPU_COUNT" "$GPU_UTIL"
     fi
     if [ "$NODE_MODE" = miner ]; then docker compose rm -sf "$old" 2>/dev/null || true
     else docker compose --profile "$old" down 2>/dev/null || true; fi
