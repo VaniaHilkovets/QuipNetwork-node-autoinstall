@@ -59,6 +59,30 @@ set_env_value() {
     fi
 }
 
+set_active_backend_config() {
+    local file="$1" backend="$2"
+    [ -f "$file" ] || return
+    python3 - "$file" "$backend" <<'PY' 2>/dev/null || true
+import re, sys
+
+path, backend = sys.argv[1], sys.argv[2]
+try:
+    text = open(path).read()
+except OSError:
+    sys.exit(0)
+
+if backend == "cpu":
+    patterns = (r"gpu", r"cuda\.\d+", r"nvidia\.\d+")
+else:
+    patterns = (r"cpu",)
+
+for pattern in patterns:
+    text = re.sub(rf'(?ms)^\[{pattern}\]\s*$.*?(?=^\[|\Z)', '', text).rstrip()
+
+open(path, 'w').write(text + '\n')
+PY
+}
+
 set_cpu_num_cpus() {
     local file="$1" count="$2"
     [ -f "$file" ] || return
@@ -339,6 +363,7 @@ do_install() {
     echo -e "  ${DIM}config...${N}"
     [ -f "$CONFIG_FILE" ] || cp "data/config.${NODE_PROFILE}.toml" "$CONFIG_FILE"
     sed -i "s|^\([[:space:]]*node_name[[:space:]]*=\).*|\1 \"${NODE_NAME}\"|" "$CONFIG_FILE"
+    set_active_backend_config "$CONFIG_FILE" "$NODE_PROFILE"
     if [ "$NODE_PROFILE" = "cpu" ]; then
         set_cpu_num_cpus "$CONFIG_FILE" "$CPU_COUNT"
     fi
@@ -527,11 +552,13 @@ do_switch() {
     if [ "$NODE_PROFILE" = "cpu" ]; then
         [ -f "$ENV_FILE" ] || cp env.example "$ENV_FILE"
         [ -f "$CONFIG_FILE" ] || cp "data/config.cpu.toml" "$CONFIG_FILE"
+        set_active_backend_config "$CONFIG_FILE" "$NODE_PROFILE"
         set_env_value "$ENV_FILE" "QUIP_MINER_CPUSET" "$CPUSET"
         set_cpu_num_cpus "$CONFIG_FILE" "$CPU_COUNT"
     else
         [ -f "$ENV_FILE" ] || cp env.example "$ENV_FILE"
         [ -f "$CONFIG_FILE" ] || cp "data/config.cuda.toml" "$CONFIG_FILE"
+        set_active_backend_config "$CONFIG_FILE" "$NODE_PROFILE"
         set_env_value "$ENV_FILE" "QUIP_GPU_UTILIZATION" "$GPU_UTIL"
         set_cuda_devices "$CONFIG_FILE" "$GPU_COUNT" "$GPU_UTIL"
     fi
