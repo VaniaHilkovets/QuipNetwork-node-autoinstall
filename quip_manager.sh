@@ -38,7 +38,7 @@ save_mode()    { echo "$1" > "$MODE_FILE";    NODE_MODE="$1"; }
 # node  : `docker compose --profile <p> ...`  (validator + dashboard + caddy + miner)
 # miner : `docker compose <verb> <p>`         (only the cpu|cuda miner service)
 c_up()   { cd "$INSTALL_DIR" || return 1
-    if [ "$NODE_MODE" = miner ]; then docker compose up -d --no-deps "$NODE_PROFILE"
+    if [ "$NODE_MODE" = miner ]; then docker compose up -d --no-deps "$@" "$NODE_PROFILE"
     else docker compose --profile "$NODE_PROFILE" up -d "$@"; fi; }
 c_down() { cd "$INSTALL_DIR" || return 1
     if [ "$NODE_MODE" = miner ]; then docker compose rm -sf "$NODE_PROFILE"
@@ -85,6 +85,20 @@ else:
 
 open(path, 'w').write(text)
 PY
+}
+
+choose_cpu_cores() {
+    local total nc
+    total=$(nproc 2>/dev/null || echo 1)
+    read -p "  cpu cores for miner [enter = all / ${total}]: " nc
+    if echo "$nc" | grep -qE '^[0-9]+$' && [ "$nc" -ge 1 ] && [ "$nc" -le "$total" ]; then
+        CPU_COUNT="$nc"
+        CPUSET="0-$((nc-1))"
+    else
+        CPU_COUNT="$total"
+        CPUSET="0-$((total-1))"
+    fi
+    echo -e "  ${DIM}cpuset = ${CPUSET}${N}"
 }
 
 get_node_name() { grep -E '^[[:space:]]*node_name' "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d'"' -f2; }
@@ -230,18 +244,9 @@ do_install() {
 
     local VALIDATORS=""   # full node uses its own bundled local validator (ws://quip-validator:9944)
 
-    local TOTAL_CPUS CPUSET="" CPU_COUNT="" GPU_UTIL="100"
-    TOTAL_CPUS=$(nproc 2>/dev/null || echo 1)
+    local CPUSET="" CPU_COUNT="" GPU_UTIL="100"
     if [ "$NODE_PROFILE" = "cpu" ]; then
-        read -p "  cpu cores for miner [enter = all / ${TOTAL_CPUS}]: " nc
-        if echo "$nc" | grep -qE '^[0-9]+$' && [ "$nc" -ge 1 ] && [ "$nc" -le "$TOTAL_CPUS" ]; then
-            CPU_COUNT="$nc"
-            CPUSET="0-$((nc-1))"
-        else
-            CPU_COUNT="$TOTAL_CPUS"
-            CPUSET="0-$((TOTAL_CPUS-1))"
-        fi
-        echo -e "  ${DIM}cpuset = ${CPUSET}${N}"
+        choose_cpu_cores
     else
         read -p "  gpu SM utilization 1-100 [100]: " gu
         echo "$gu" | grep -qE '^[0-9]+$' && [ "$gu" -ge 1 ] && [ "$gu" -le 100 ] && GPU_UTIL="$gu"
@@ -464,19 +469,28 @@ do_update() {
 do_switch() {
     header
     [ -d "$INSTALL_DIR" ] || { echo -e "  ${R}not installed${N}"; read -p "  "; return; }
-    local old="$NODE_PROFILE"
+    local old="$NODE_PROFILE" CPUSET="" CPU_COUNT=""
     echo -e "  ${DIM}switch backend (keeps mode + wallet)${N}"
     echo -e "  ${C}1${N}  cpu"
     echo -e "  ${C}2${N}  cuda"
     read -p "  [current: ${old^^}]: " p
     case "$p" in 2) NODE_PROFILE="cuda";; *) NODE_PROFILE="cpu";; esac
     [ "$NODE_PROFILE" = "cuda" ] && { check_gpu || { NODE_PROFILE="$old"; read -p "  "; return; }; }
+    if [ "$NODE_PROFILE" = "cpu" ]; then
+        choose_cpu_cores
+    fi
     cd "$INSTALL_DIR" || return
+    if [ "$NODE_PROFILE" = "cpu" ]; then
+        [ -f "$ENV_FILE" ] || cp env.example "$ENV_FILE"
+        [ -f "$CONFIG_FILE" ] || cp "data/config.cpu.toml" "$CONFIG_FILE"
+        set_env_value "$ENV_FILE" "QUIP_MINER_CPUSET" "$CPUSET"
+        set_cpu_num_cpus "$CONFIG_FILE" "$CPU_COUNT"
+    fi
     if [ "$NODE_MODE" = miner ]; then docker compose rm -sf "$old" 2>/dev/null || true
     else docker compose --profile "$old" down 2>/dev/null || true; fi
     save_profile "$NODE_PROFILE"
     [ "$NODE_PROFILE" = "cuda" ] && ensure_no_mps
-    c_pull && c_up
+    c_pull && c_up --force-recreate
     read -p "  enter..."
 }
 
