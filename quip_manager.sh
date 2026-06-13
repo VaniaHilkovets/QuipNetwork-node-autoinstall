@@ -174,6 +174,7 @@ choose_gpu_utilization() {
 
 get_node_name() { grep -E '^[[:space:]]*node_name' "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d'"' -f2; }
 get_validators() { grep -E '^[[:space:]]*QUIP_VALIDATORS=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-; }
+get_env_value() { grep -E "^#?[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-; }
 local_node_running() { docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^quip-validator$'; }
 
 # Miner ss58 address: keystore.json -> miner logs -> status API.
@@ -274,6 +275,31 @@ ensure_no_mps() {
     pkill -9 -f nvidia-cuda-mps 2>/dev/null
     rm -rf /tmp/nvidia-mps/* 2>/dev/null
     echo -e "  ${DIM}MPS off — direct GPU (stable for single-GPU)${N}"
+}
+
+start_mps() {
+    if ! command -v nvidia-cuda-mps-control &>/dev/null; then
+        echo -e "  ${Y}nvidia-cuda-mps-control not found; GPU cap may not apply${N}"
+        return 0
+    fi
+    mkdir -p /tmp/nvidia-mps 2>/dev/null || true
+    if pgrep -f nvidia-cuda-mps-control &>/dev/null; then
+        echo -e "  ${DIM}MPS already running${N}"
+    else
+        CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps nvidia-cuda-mps-control -d 2>/dev/null \
+            && echo -e "  ${DIM}MPS on; GPU SM cap active${N}" \
+            || echo -e "  ${Y}failed to start MPS; GPU cap may not apply${N}"
+    fi
+}
+
+configure_mps_for_utilization() {
+    local util="${1:-100}"
+    echo "$util" | grep -qE '^[0-9]+$' || util=100
+    if [ "${CSD_QUIP_MPS:-0}" = "1" ] || [ "$util" -lt 100 ]; then
+        start_mps
+    else
+        ensure_no_mps
+    fi
 }
 
 # ---------- install ----------------------------------------------------------
@@ -414,7 +440,7 @@ PY
 
     echo -e "  ${DIM}pulling images...${N}"
     c_pull
-    [ "$NODE_PROFILE" = "cuda" ] && ensure_no_mps
+    [ "$NODE_PROFILE" = "cuda" ] && configure_mps_for_utilization "$GPU_UTIL"
     echo -e "  ${DIM}starting ($([ "$NODE_MODE" = miner ] && echo 'miner only' || echo 'full node'))...${N}"
     c_up --force-recreate 2>/dev/null || c_up
 
@@ -437,7 +463,7 @@ PY
 do_start() {
     header
     [ -d "$INSTALL_DIR" ] || { echo -e "  ${R}not installed${N}"; read -p "  "; return; }
-    [ "$NODE_PROFILE" = "cuda" ] && { check_gpu || { read -p "  "; return; }; ensure_no_mps; }
+    [ "$NODE_PROFILE" = "cuda" ] && { check_gpu || { read -p "  "; return; }; configure_mps_for_utilization "$(get_env_value QUIP_GPU_UTILIZATION)"; }
     c_up
     read -p "  enter..."
 }
@@ -528,7 +554,7 @@ do_update() {
     [ -d "$INSTALL_DIR" ] || { echo -e "  ${R}not installed${N}"; read -p "  "; return; }
     cd "$INSTALL_DIR" || return
     git pull --ff-only 2>/dev/null || true
-    [ "$NODE_PROFILE" = "cuda" ] && ensure_no_mps
+    [ "$NODE_PROFILE" = "cuda" ] && configure_mps_for_utilization "$(get_env_value QUIP_GPU_UTILIZATION)"
     c_pull && c_up
     read -p "  enter..."
 }
@@ -565,7 +591,7 @@ do_switch() {
     if [ "$NODE_MODE" = miner ]; then docker compose rm -sf "$old" 2>/dev/null || true
     else docker compose --profile "$old" down 2>/dev/null || true; fi
     save_profile "$NODE_PROFILE"
-    [ "$NODE_PROFILE" = "cuda" ] && ensure_no_mps
+    [ "$NODE_PROFILE" = "cuda" ] && configure_mps_for_utilization "$GPU_UTIL"
     c_pull && c_up --force-recreate
     read -p "  enter..."
 }
