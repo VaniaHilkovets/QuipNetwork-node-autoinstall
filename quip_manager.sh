@@ -59,6 +59,34 @@ set_env_value() {
     fi
 }
 
+set_cpu_num_cpus() {
+    local file="$1" count="$2"
+    [ -f "$file" ] || return
+    python3 - "$file" "$count" <<'PY' 2>/dev/null || true
+import re, sys
+
+path, count = sys.argv[1], sys.argv[2]
+try:
+    text = open(path).read()
+except OSError:
+    sys.exit(0)
+
+section_re = re.compile(r'(?ms)^\[cpu\]\s*$.*?(?=^\[|\Z)')
+match = section_re.search(text)
+if match:
+    section = match.group(0)
+    if re.search(r'(?m)^\s*#?\s*num_cpus\s*=', section):
+        section = re.sub(r'(?m)^\s*#?\s*num_cpus\s*=.*$', f'num_cpus = {count}', section, count=1)
+    else:
+        section = section.rstrip() + f'\nnum_cpus = {count}\n'
+    text = text[:match.start()] + section + text[match.end():]
+else:
+    text = text.rstrip() + f'\n\n[cpu]\nnum_cpus = {count}\n'
+
+open(path, 'w').write(text)
+PY
+}
+
 get_node_name() { grep -E '^[[:space:]]*node_name' "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d'"' -f2; }
 get_validators() { grep -E '^[[:space:]]*QUIP_VALIDATORS=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-; }
 local_node_running() { docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^quip-validator$'; }
@@ -202,13 +230,17 @@ do_install() {
 
     local VALIDATORS=""   # full node uses its own bundled local validator (ws://quip-validator:9944)
 
-    local TOTAL_CPUS CPUSET="" GPU_UTIL="100"
+    local TOTAL_CPUS CPUSET="" CPU_COUNT="" GPU_UTIL="100"
     TOTAL_CPUS=$(nproc 2>/dev/null || echo 1)
     if [ "$NODE_PROFILE" = "cpu" ]; then
         read -p "  cpu cores for miner [enter = all / ${TOTAL_CPUS}]: " nc
         if echo "$nc" | grep -qE '^[0-9]+$' && [ "$nc" -ge 1 ] && [ "$nc" -le "$TOTAL_CPUS" ]; then
+            CPU_COUNT="$nc"
             CPUSET="0-$((nc-1))"
-        else CPUSET="0-$((TOTAL_CPUS-1))"; fi
+        else
+            CPU_COUNT="$TOTAL_CPUS"
+            CPUSET="0-$((TOTAL_CPUS-1))"
+        fi
         echo -e "  ${DIM}cpuset = ${CPUSET}${N}"
     else
         read -p "  gpu SM utilization 1-100 [100]: " gu
@@ -257,6 +289,9 @@ do_install() {
     echo -e "  ${DIM}config...${N}"
     [ -f "$CONFIG_FILE" ] || cp "data/config.${NODE_PROFILE}.toml" "$CONFIG_FILE"
     sed -i "s|^\([[:space:]]*node_name[[:space:]]*=\).*|\1 \"${NODE_NAME}\"|" "$CONFIG_FILE"
+    if [ "$NODE_PROFILE" = "cpu" ]; then
+        set_cpu_num_cpus "$CONFIG_FILE" "$CPU_COUNT"
+    fi
     # CUDA: the entrypoint only auto-generates [cuda.N] for a FRESH config, not an
     # existing one. Without a real [cuda.0] the miner builds 0 GPU handles and
     # crash-loops ("no miner handles built for kind=gpu"). Ensure it exists.
