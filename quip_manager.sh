@@ -337,7 +337,7 @@ do_install() {
         echo "$EVM" | grep -qiE '^0x[0-9a-fA-F]{40}$' && break
         echo -e "  ${Y}invalid — need 0x + 40 hex${N}"
     done
-    [ -n "$EVM" ] && NODE_NAME="${NODE_NAME}-${EVM}" && echo -e "  ${DIM}node_name = ${NODE_NAME}${N}"
+    [ -n "$EVM" ] && NODE_NAME="${NODE_NAME} - ${EVM}" && echo -e "  ${DIM}node_name = ${NODE_NAME}${N}"
 
     local VALIDATORS=""   # full node uses its own bundled local validator (ws://quip-validator:9944)
 
